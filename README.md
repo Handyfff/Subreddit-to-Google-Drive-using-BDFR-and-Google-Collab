@@ -61,3 +61,4 @@ The entire command will look like this
 
 
 Now once you're done using this I suggest you save this notebook for future use. You don't want to repeat this procedure again. For that click on top left menu click on file then Save a Copy in Drive. It will create this notebook into your drive within a folder called Collab Notebooks. Fir future you can just open this file into your browser and you won't have to paste anything this time. The procedure will be the same otherwise. Just remember to wait for the green tick to move to next execution(lol).
+I have also attached a screenshot of how it looks on my Android phone with Brave Browser.
