@@ -1,3 +1,6 @@
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/<Handyfff>/<Subreddit-to-Google-Drive-using-BDFR-and-Google-Collab>/blob/<main>/<path_to_notebook>)
+
+
 # Subreddit-to-Google-Drive-using-BDFR-and-Google-Collab
 It can download an entire subreddit to your drive without any data usage.
 
