@@ -1,0 +1,63 @@
+// ==UserScript==
+// @name         DeepSeek Anti-Refusal Saver V2
+// @namespace    http://tampermonkey.net/
+// @version      2.0
+// @description  Buffers and restores DeepSeek answers, resetting correctly between chats.
+// @author       You
+// @match        https://chat.deepseek.com/*
+// @grant        GM_setClipboard
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    let currentMessageNode = null; // Tracks the physical HTML box
+    let messageBuffer = "";
+    let refusalCaught = false;
+
+    const refusalTrigger = "Sorry, that's beyond my current scope";
+
+    const observer = new MutationObserver((mutations) => {
+        const messages = document.querySelectorAll('.ds-assistant-message-main-content');
+        if (messages.length === 0) return;
+
+        const latestMessage = messages[messages.length - 1];
+
+        // NEW: If DeepSeek creates a new message box (or you switch chats), reset everything!
+        if (latestMessage !== currentMessageNode) {
+            currentMessageNode = latestMessage;
+            messageBuffer = "";
+            refusalCaught = false;
+        }
+
+        const currentText = latestMessage.innerText.trim();
+        const isRefusal = currentText.includes(refusalTrigger);
+
+        // If it's a refusal, we have text saved, and we haven't already restored it
+        if (isRefusal && messageBuffer.length > 10 && !refusalCaught) {
+            console.log("Refusal detected! Restoring previous text...");
+
+            // 1. Copy to clipboard
+            GM_setClipboard(messageBuffer);
+
+            // 2. Restore the text on screen
+            latestMessage.innerText = "\n[RESTORED & COPIED TO CLIPBOARD]:\n\n" + messageBuffer;
+            latestMessage.style.color = "#ff9900";
+
+            refusalCaught = true;
+
+        } else if (!isRefusal && !refusalCaught) {
+            // Keep saving the longest valid text for this specific message
+            if (currentText.length > messageBuffer.length) {
+                messageBuffer = currentText;
+            }
+        }
+    });
+
+    observer.observe(document.body, {
+        childList: true,
+        characterData: true,
+        subtree: true
+    });
+
+})();
