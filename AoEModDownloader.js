@@ -1,12 +1,15 @@
 // ==UserScript==
 // @name         Age of Empires Mods - Direct Download Button
-// @namespace    https://chatgpt.com/
-// @version      1.0.0
-// @description  Adds a direct download button on ageofempires.com mod detail pages.
+// @namespace    boiiii
+// @version      1.2.0
+// @description  Adds a direct download button on ageofempires.com mod detail pages and names the archive after the real mod title.
 // @match        https://www.ageofempires.com/mods/*
 // @match        https://ageofempires.com/mods/*
 // @run-at       document-idle
-// @grant        none
+// @grant        GM_download
+// @grant        GM_xmlhttpRequest
+// @connect      api.ageofempires.com
+// @connect      *
 // ==/UserScript==
 
 (() => {
@@ -15,7 +18,9 @@
     const API_URL = 'https://api.ageofempires.com/api/v1/mods/Download';
     const ROOT_ID = 'aoe-direct-mod-download-root';
     const STYLE_ID = 'aoe-direct-mod-download-style';
-    const MAX_ERROR_LENGTH = 500;
+    const FALLBACK_BASENAME_PREFIX = 'aoe_';
+    const DEFAULT_EXTENSION = '.zip';
+    const MAX_ERROR_LENGTH = 600;
 
     let lastUrl = location.href;
     let busy = false;
@@ -41,6 +46,14 @@
             .slice(0, MAX_ERROR_LENGTH);
     }
 
+    function textOf(selector) {
+        return compactText(document.querySelector(selector)?.textContent);
+    }
+
+    function attrOf(selector, attr) {
+        return compactText(document.querySelector(selector)?.getAttribute(attr));
+    }
+
     function jsonFromText(text) {
         try {
             return JSON.parse(text);
@@ -49,12 +62,113 @@
         }
     }
 
+    function stripSiteSuffix(value) {
+        return compactText(value)
+            .replace(/\s*[-–—|]\s*Mods?\s*[-–—|]\s*Age of Empires.*$/i, '')
+            .replace(/\s*[-–—|]\s*Age of Empires.*$/i, '')
+            .replace(/\s*[-–—|]\s*Mods?\s*$/i, '')
+            .trim();
+    }
+
+    function isGenericTitle(value) {
+        const title = stripSiteSuffix(value);
+        return !title ||
+            /^mods?$/i.test(title) ||
+            /^mods?\s+single$/i.test(title) ||
+            /^age of empires$/i.test(title) ||
+            /^age of empires\s+mods?$/i.test(title) ||
+            /^world'?s edge studio$/i.test(title);
+    }
+
+    function firstGoodTitle(candidates) {
+        for (const candidate of candidates) {
+            const cleaned = stripSiteSuffix(candidate);
+            if (!isGenericTitle(cleaned)) return cleaned;
+        }
+        return '';
+    }
+
+    function getPageModTitle(modId) {
+        /*
+         * The AoE mod page uses generic OpenGraph titles like:
+         * "Mods Single - Age of Empires - World's Edge Studio".
+         * The actual mod name is in the rendered detail header:
+         * #mod-detail-top h2
+         */
+        const sameModHref = `/mods/details/${modId}/`;
+
+        const candidates = [
+            textOf('#mod-detail-top h2'),
+            textOf('#mod-detail .mods__details__top h2'),
+            textOf('#mod-detail .mods__details__top__info h2'),
+            textOf('.js-mods__details-page h2'),
+            attrOf(`a[href*="${sameModHref}"] img[alt]`, 'alt'),
+            textOf(`a[href*="${sameModHref}"]`),
+            document.title,
+            attrOf('meta[property="og:title"]', 'content'),
+            attrOf('meta[name="twitter:title"]', 'content'),
+        ];
+
+        return firstGoodTitle(candidates) || `${FALLBACK_BASENAME_PREFIX}${modId}`;
+    }
+
+    function sanitizeBasename(rawName, modId) {
+        const normalized = String(rawName || '')
+            .normalize('NFKD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/&/g, 'And')
+            .replace(/['’`]/g, '')
+            .replace(/[<>:"/\\|?*\x00-\x1F]/g, '')
+            .replace(/\s+/g, '')
+            .replace(/[^\p{L}\p{N}()[\]{}+!,@#$%^=~._-]/gu, '')
+            .replace(/^[.\s]+|[.\s]+$/g, '');
+
+        return normalized.slice(0, 120) || `${FALLBACK_BASENAME_PREFIX}${modId}`;
+    }
+
+    function extensionFromUrl(downloadUrl) {
+        try {
+            const filename = new URL(downloadUrl).pathname.split('/').pop() || '';
+            const match = filename.match(/\.(zip|7z|rar|tar|gz|tgz|bz2|xz)$/i);
+            return match ? `.${match[1].toLowerCase()}` : DEFAULT_EXTENSION;
+        } catch {
+            return DEFAULT_EXTENSION;
+        }
+    }
+
+    function filenameFromPage(modId, downloadUrl, payload) {
+        const apiTitle = compactText(
+            payload?.value?.title ||
+            payload?.value?.name ||
+            payload?.value?.modName ||
+            payload?.title ||
+            payload?.name ||
+            payload?.modName
+        );
+
+        const realTitle = firstGoodTitle([apiTitle]) || getPageModTitle(modId);
+        return `${sanitizeBasename(realTitle, modId)}${extensionFromUrl(downloadUrl)}`;
+    }
+
     function setStatus(message, isError = false) {
         const status = document.querySelector(`#${ROOT_ID} .aoe-dd-status`);
         if (!status) return;
 
         status.textContent = message || '';
         status.dataset.error = isError ? '1' : '0';
+    }
+
+    function setProgress(loaded, total) {
+        if (!Number.isFinite(loaded) || loaded <= 0) return;
+
+        if (Number.isFinite(total) && total > 0) {
+            const percent = Math.max(0, Math.min(100, Math.round((loaded / total) * 100)));
+            setStatus(`Downloading archive… ${percent}%`);
+            return;
+        }
+
+        const mib = loaded / 1048576;
+        setStatus(`Downloading archive… ${mib.toFixed(mib >= 10 ? 0 : 1)} MiB`);
     }
 
     function getDownloadUrlFromPayload(payload) {
@@ -74,21 +188,21 @@
                     return url.href;
                 }
             } catch {
-                // Ignore invalid candidates.
+                // Ignore invalid URL candidate.
             }
         }
 
         return null;
     }
 
-    async function requestDownloadUrl(modId) {
+    async function requestDownloadInfo(modId) {
         const response = await fetch(API_URL, {
             method: 'POST',
             mode: 'cors',
             credentials: 'include',
             cache: 'no-store',
             headers: {
-                'Accept': 'application/json, text/plain, */*',
+                Accept: 'application/json, text/plain, */*',
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({ id: modId, boolValue: true }),
@@ -108,7 +222,112 @@
             throw new Error(`API answered, but no download URL was found${detail ? `: ${detail}` : '.'}`);
         }
 
-        return downloadUrl;
+        return {
+            downloadUrl,
+            filename: filenameFromPage(modId, downloadUrl, payload),
+            payload,
+        };
+    }
+
+    function gmDownload(url, filename) {
+        return new Promise((resolve, reject) => {
+            if (typeof GM_download !== 'function') {
+                reject(new Error('GM_download is not available.'));
+                return;
+            }
+
+            try {
+                GM_download({
+                    url,
+                    name: filename,
+                    saveAs: false,
+                    onprogress: event => setProgress(event.loaded, event.total),
+                    onload: () => resolve(),
+                    ontimeout: () => reject(new Error('GM_download timed out.')),
+                    onerror: error => {
+                        const reason = compactText(error?.error || error?.details || error || 'unknown error');
+                        reject(new Error(`GM_download failed: ${reason}`));
+                    },
+                });
+            } catch (error) {
+                reject(error);
+            }
+        });
+    }
+
+    function gmGetBlob(url) {
+        return new Promise((resolve, reject) => {
+            if (typeof GM_xmlhttpRequest !== 'function') {
+                reject(new Error('GM_xmlhttpRequest is not available.'));
+                return;
+            }
+
+            try {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url,
+                    responseType: 'blob',
+                    anonymous: true,
+                    timeout: 0,
+                    onprogress: event => setProgress(event.loaded, event.total),
+                    onload: response => {
+                        if (response.status < 200 || response.status >= 300) {
+                            reject(new Error(`archive request returned HTTP ${response.status}`));
+                            return;
+                        }
+
+                        const blob = response.response;
+                        if (!(blob instanceof Blob) || blob.size === 0) {
+                            reject(new Error('archive response was empty or not a Blob'));
+                            return;
+                        }
+
+                        resolve(blob);
+                    },
+                    ontimeout: () => reject(new Error('archive request timed out')),
+                    onerror: error => {
+                        const reason = compactText(error?.error || error?.details || error || 'unknown error');
+                        reject(new Error(`archive request failed: ${reason}`));
+                    },
+                });
+            } catch (error) {
+                reject(error);
+            }
+        });
+    }
+
+    function saveBlob(blob, filename) {
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+
+        anchor.href = objectUrl;
+        anchor.download = filename;
+        anchor.style.display = 'none';
+
+        document.body.appendChild(anchor);
+        anchor.click();
+
+        setTimeout(() => {
+            URL.revokeObjectURL(objectUrl);
+            anchor.remove();
+        }, 30_000);
+    }
+
+    async function startNamedDownload(downloadUrl, filename) {
+        setStatus(`Starting ${filename}…`);
+
+        try {
+            await gmDownload(downloadUrl, filename);
+            setStatus(`Downloaded as ${filename}.`);
+            return;
+        } catch (gmError) {
+            console.warn('[AoE direct mod downloader] GM_download failed; trying blob fallback.', gmError);
+        }
+
+        setStatus('Direct named download failed; using blob fallback…');
+        const blob = await gmGetBlob(downloadUrl);
+        saveBlob(blob, filename);
+        setStatus(`Downloaded as ${filename}.`);
     }
 
     function ensureStyle() {
@@ -122,7 +341,7 @@
     right: 18px;
     bottom: 18px;
     z-index: 2147483647;
-    width: min(340px, calc(100vw - 36px));
+    width: min(360px, calc(100vw - 36px));
     box-sizing: border-box;
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     color: #fff;
@@ -227,7 +446,7 @@
         const button = document.createElement('button');
         button.className = 'aoe-dd-button';
         button.type = 'button';
-        button.textContent = 'Download mod archive';
+        button.textContent = 'Download named archive';
 
         const close = document.createElement('button');
         close.className = 'aoe-dd-close';
@@ -239,7 +458,9 @@
         const status = document.createElement('div');
         status.className = 'aoe-dd-status';
         status.dataset.error = '0';
-        status.textContent = 'Sign in on ageofempires.com first, then click this.';
+
+        const detectedTitle = getPageModTitle(modId);
+        status.textContent = `Detected title: ${detectedTitle}. Filename will remove spaces.`;
 
         close.addEventListener('click', dismissButton);
 
@@ -254,16 +475,25 @@
 
             busy = true;
             button.disabled = true;
-            button.textContent = 'Getting download link…';
+            button.textContent = 'Preparing download…';
             setStatus('Requesting the official download URL…');
 
             try {
-                const downloadUrl = await requestDownloadUrl(currentId);
-                setStatus('Download starting. If nothing happens, allow downloads/popups for this site.');
-                window.location.assign(downloadUrl);
+                const { downloadUrl, filename } = await requestDownloadInfo(currentId);
+                button.textContent = 'Downloading…';
+                await startNamedDownload(downloadUrl, filename);
+
+                button.textContent = 'Download again';
+                button.disabled = false;
+                busy = false;
             } catch (error) {
                 console.error('[AoE direct mod downloader]', error);
-                setStatus(`${error?.message || error} — Make sure you are signed into ageofempires.com in this browser.`, true);
+
+                setStatus(
+                    `${error?.message || error} — Make sure you are signed into ageofempires.com and allow Tampermonkey download/connect prompts.`,
+                    true
+                );
+
                 button.disabled = false;
                 button.textContent = 'Try download again';
                 busy = false;
